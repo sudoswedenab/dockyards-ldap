@@ -15,22 +15,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dockyards-keycloak
+  name: dockyards-ldap
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: dockyards-keycloak
+      app.kubernetes.io/name: dockyards-ldap
       app.kubernetes.io/part-of: dockyards
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: dockyards-keycloak
+        app.kubernetes.io/name: dockyards-ldap
         app.kubernetes.io/part-of: dockyards
-      name: dockyards-keycloak
+      name: dockyards-ldap
     spec:
       containers:
-        - image: dockyards-keycloak
-          name: dockyards-keycloak
+        - image: dockyards-ldap
+          name: dockyards-ldap
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -47,7 +47,7 @@ spec:
                   fieldPath: metadata.namespace
       imagePullSecrets:
         - name: dockyards-registry
-      serviceAccountName: dockyards-keycloak
+      serviceAccountName: dockyards-ldap
       securityContext:
         fsGroup: 65532
         runAsUser: 65532

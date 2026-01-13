@@ -14,6 +14,5 @@
 
 package main
 
-//go:generate go tool controller-gen rbac:roleName=dockyards-keycloak crd object paths="./..."
-//go:generate ../../oapi-codegen/oapi-codegen --config=config/keycloak.yaml spec/keycloak.yaml
+//go:generate go tool controller-gen rbac:roleName=dockyards-ldap crd object paths="./..."
 //go:generate go tool addlicense -c "Sudo Sweden AB" -y 2025 .

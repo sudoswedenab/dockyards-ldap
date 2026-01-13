@@ -13,7 +13,7 @@ resources: [
 ]
 images: [
 	{
-		name:    "dockyards-keycloak"
+		name:    "dockyards-ldap"
 		newName: _name
 		newTag:  _tag
 	},

@@ -33,7 +33,7 @@ jobs:
       - uses: sudoswedenab/sudo-actions/build-push@main
         with:
           aws-region: us-east-1
-          image: sudosweden/dockyards-keycloak
+          image: sudosweden/dockyards-ldap
           registry-type: public
-          role-to-assume: arn:aws:iam::075899289117:role/GithubActionsDockyardsKeycloak
+          role-to-assume: arn:aws:iam::075899289117:role/GithubActionsDockyardsLDAP
           tag: ${{ steps.prep.outputs.buildid }}
