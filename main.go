@@ -224,6 +224,17 @@ func (c *Config) resourcesToDelete() []client.Object {
 		result = append(result, &org)
 	}
 
+	for _, org := range c.orgs {
+		if c.markedOrgs[org.Name] {
+			continue
+		}
+		result = append(result, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: org.Name,
+			},
+		})
+	}
+
 	return result
 }
 
