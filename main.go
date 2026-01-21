@@ -394,7 +394,6 @@ func (h *LDAPHandler) runOnce(ctx context.Context, config *Config) {
 	}
 	defer conn.Unbind()
 
-	h.logger.Info("searching for orgs")
 	orgQuery, err := conn.SearchWithPaging(&ldapv3.SearchRequest{
 		BaseDN: config.organizationBaseDN,
 		Scope: ldapv3.ScopeSingleLevel,
@@ -408,7 +407,6 @@ func (h *LDAPHandler) runOnce(ctx context.Context, config *Config) {
 		h.logger.Error("could not search for organizations", "err", err, "baseDN", config.organizationBaseDN, "filter", config.organizationFilter)
 		return
 	}
-	h.logger.Info("got orgs", "count", len(orgQuery.Entries))
 
 	orgDNs := make([]string, len(orgQuery.Entries))[:0]
 	orgIDByDN := make(map[string]string, len(orgQuery.Entries))
@@ -539,10 +537,13 @@ func (h *LDAPHandler) createOrgIfNeeded(ctx context.Context, config *Config, sub
 	err := h.client.Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
+			Labels: map[string]string{
+				dockyardsv1.LabelProviderName: config.providerName,
+			},
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("could not create namespace: %w", err)
+		h.logger.Error("could not create namespace", "err", err, "subject", subject, "name", name)
 	}
 
 	h.logger.Info("creating organization", "subject", subject, "displayName", displayName)
