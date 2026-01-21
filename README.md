@@ -13,12 +13,13 @@ Usage of dockyards-ldap:
 
 ```yaml
 
-ldap.address: ldap://openldap.default.svc           # The address to the LDAP server.
-ldap.polling-interval: 1m                           # How often we should sync.
-ldap.identity-provider-name: midgard-lab            # Name to prefix resources with. This should be the same as the user provider in OIDC if it is configured.
-ldap.base-dn: ou=Dockyards,dc=example,dc=org        # This is where queries will be done.
-ldap.organization-filter: (objectClass=posixGroup)  # The filter to apply to get dockyards organizations. The object is assumed to look like a posixGroup (i.e. it should have a gidNumber and memberUid).
-ldap.secret.credentials: ldap-credentials           # Name of the secret containing the authentication credentials.
+ldap.address: ldap://openldap.default.svc                   # The address to the LDAP server.
+ldap.polling-interval: 1m                                   # How often we should sync.
+ldap.identity-provider-name: midgard-lab                    # Name to prefix resources with. This should be the same as the user provider in OIDC if it is configured.
+ldap.organization-base-dn: OU=Dockyards,DC=example,DC=org   # This is where organizations will be queried.
+ldap.organization-filter: (objectClass=group)               # The filter to apply to dockyards organizations. The organization must have a gidNumber.
+ldap.user-base-dn: ou=Users,DC=example,DC=org               # This is where we search for users. For each organization they are a part of, the member should have a memberOf attribute containing the DN of the organization. e.g. memberOf: CN=prod,OU=Dockyards,DC=example,DC=org. Additionally, the user must have a sAMAccountName containing their username.
+ldap.secret.credentials: ldap-credentials                   # Name of the secret containing the authentication credentials.
 
 ```
 

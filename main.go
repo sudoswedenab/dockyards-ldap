@@ -44,11 +44,13 @@ import (
 
 const (
 	KeyLDAPAddress 				dyconfig.Key = "ldap.address" 					// Address of the ldap server. e.g. "ldap://openldap.default.svc"
-	KeyLDAPPollingInterval 		dyconfig.Key = "ldap.polling-interval" 			// Interval of which the service will refresh the state. e.g. "5s"
-	KeyLDAPIdentityProviderName dyconfig.Key = "ldap.identity-provider-name" 	// Name of the provider which will manage the ldap created resources.
+	KeyLDAPPollingInterval 		dyconfig.Key = "ldap.polling-interval" 			// Interval of which the service will refresh the state. e.g. "1m"
+	KeyLDAPIdentityProviderName dyconfig.Key = "ldap.identity-provider-name" 	// Name of the provider which will manage the ldap created resources. (same as OIDC)
 
-	KeyLDAPBaseDN 				dyconfig.Key = "ldap.base-dn" 					// Base distinguished name. e.g. "ou=Dockyards,dc=example,dc=org"
-	KeyLDAPOrganizationFilter 	dyconfig.Key = "ldap.organization-filter" 		// Filter for dockyards organizations in ldap query. e.g. "(objectClass=posixGroup)"
+	KeyLDAPOrganizationBaseDN 	dyconfig.Key = "ldap.organization-base-dn" 		// Which DN we should look for dockyards organizations in. e.g. "ou=Dockyards,dc=example,dc=org"
+	KeyLDAPOrganizationFilter 	dyconfig.Key = "ldap.organization-filter" 		// Filter for dockyards organizations in ldap query. e.g. "(objectClass=group)"
+	KeyLDAPUserBaseDN 			dyconfig.Key = "ldap.user-base-dn" 				// Location to search for users. e.g. "OU=Users,OU=Tele2,OU=SE,OU=Resources,DC=corp,DC=tele2,DC=com"
+	// NOTE: There is no KeyLDAPUserFilter, it is built dynamically from the organizations that exist
 
 	KeyLDAPSecretCredentials 	dyconfig.Key = "ldap.secret.credentials" 		// Name of the secret containing the login-dn and password
 )
@@ -161,8 +163,9 @@ type Config struct {
 	address string
 	providerName string
 
-	baseDN string
+	organizationBaseDN string
 	organizationFilter string
+	userBaseDN string
 
 	username string
 	password string
@@ -277,14 +280,19 @@ func (h *LDAPHandler) Config(ctx context.Context) *Config {
 		h.logger.Error("address has not been set in config map", "key", KeyLDAPAddress)
 		didError = true
 	}
-	baseDN, ok := h.config.GetValueForKey(KeyLDAPBaseDN)
+	orgBaseDN, ok := h.config.GetValueForKey(KeyLDAPOrganizationBaseDN)
 	if !ok {
-		h.logger.Error("base DN has not been set in config map", "key", KeyLDAPBaseDN)
+		h.logger.Error("org base DN has not been set in config map", "key", KeyLDAPOrganizationBaseDN)
 		didError = true
 	}
 	orgFilter, ok := h.config.GetValueForKey(KeyLDAPOrganizationFilter)
 	if !ok {
 		h.logger.Error("organization filter has not been set in config map", "key", KeyLDAPOrganizationFilter)
+		didError = true
+	}
+	userBaseDN, ok := h.config.GetValueForKey(KeyLDAPUserBaseDN)
+	if !ok {
+		h.logger.Error("user base DN has not been set in config map", "key", KeyLDAPUserBaseDN)
 		didError = true
 	}
 	identityProviderName := h.config.GetValueOrDefault(KeyLDAPIdentityProviderName, "")
@@ -347,8 +355,9 @@ func (h *LDAPHandler) Config(ctx context.Context) *Config {
 	return &Config{
 		pollingInterval: pollingInterval,
 		address: address,
-		baseDN: baseDN,
+		organizationBaseDN: orgBaseDN,
 		organizationFilter: orgFilter,
+		userBaseDN: userBaseDN,
 		username: string(username),
 		password: string(password),
 		providerName: identityProviderName,
@@ -374,62 +383,132 @@ func (h *LDAPHandler) runOnce(ctx context.Context, config *Config) {
 	}
 	defer conn.Unbind()
 
-	var orgNames map[string]string
-	var orgMembers map[string][]string
-	orgs, err := conn.Search(&ldapv3.SearchRequest{
-		BaseDN: config.baseDN,
+	h.logger.Info("searching for orgs")
+	orgQuery, err := conn.SearchWithPaging(&ldapv3.SearchRequest{
+		BaseDN: config.organizationBaseDN,
 		Scope: ldapv3.ScopeSingleLevel,
 		Filter: config.organizationFilter,
-	})
+		Attributes: []string{
+			"gidNumber",
+			"cn",
+		},
+	}, 1024)
 	if err != nil {
-		h.logger.Error("could not search for organizations", "err", err, "baseDN", config.baseDN, "filter", config.organizationFilter)
+		h.logger.Error("could not search for organizations", "err", err, "baseDN", config.organizationBaseDN, "filter", config.organizationFilter)
 		return
 	}
+	h.logger.Info("got orgs", "count", len(orgQuery.Entries))
 
-	orgNames = make(map[string]string, len(orgs.Entries))
-	orgMembers = make(map[string][]string, len(orgs.Entries))
-	for _, org := range orgs.Entries {
+	orgDNs := make([]string, len(orgQuery.Entries))[:0]
+	orgIDByDN := make(map[string]string, len(orgQuery.Entries))
+	orgNameByID := make(map[string]string, len(orgQuery.Entries))
+	for _, org := range orgQuery.Entries {
 		id := org.GetAttributeValue("gidNumber")
 		if id == "" {
 			h.logger.Error("org did not have a gidNumber attribute", "org", org.DN)
 			continue
 		}
+		_, ok := orgIDByDN[org.DN]
+		if ok {
+			h.logger.Error("duplicate org id found", "org", org.DN)
+			continue
+		}
+		orgIDByDN[org.DN] = id
+		orgDNs = append(orgDNs, org.DN)
+
 		commonName := org.GetAttributeValue("cn")
 		if commonName == "" {
 			h.logger.Warn("org did not have a cn attribute", "org", org.DN)
 			commonName = id
 		}
-		members := org.GetAttributeValues("memberUid")
-		if len(members) == 0 {
-			h.logger.Warn("org did not have any memberUid attributes", "org", org.DN)
-		}
-		orgNames[id] = commonName
-		orgMembers[id] = members
+		orgNameByID[id] = commonName
 	}
 
-	for name, displayName := range orgNames {
-		err := h.createOrgIfNeeded(ctx, config, name, displayName)
+	if len(orgDNs) != 0 {
+		filter := ""
+		filter += "(|"
+		for _, org := range orgDNs {
+			filter += "(memberOf=" + org + ")"
+		}
+		filter += ")"
+
+		userQuery, err := conn.SearchWithPaging(&ldapv3.SearchRequest{
+			BaseDN: config.userBaseDN,
+			Scope: ldapv3.ScopeSingleLevel,
+			Filter: filter,
+			Attributes: []string{
+				"sAMAccountName",
+				"memberOf",
+			},
+		}, 1024)
 		if err != nil {
-			h.logger.Warn("could not create org", "err", err, "name", name, "displayName", displayName)
+			h.logger.Error("could not search for members", "err", err, "filter", filter)
+			return
 		}
-	}
 
-	for org, members := range orgMembers {
-		for _, member := range members {
-			err := h.createMemberIfNeeded(ctx, config, org, member)
+		// account name => org name
+		userGroups := make(map[string][]string, len(userQuery.Entries))
+		groupMentioned := make(map[string]bool, len(userQuery.Entries))
+
+		for _, user := range userQuery.Entries {
+			accountName := user.GetAttributeValue("sAMAccountName")
+			if accountName == "" {
+				h.logger.Warn("user did not have sAMAccountName attribute, ignoring it", "dn", user.DN)
+				continue
+			}
+			_, ok := userGroups[accountName]
+			if ok {
+				h.logger.Warn("duplicate sAMAccountName found, ignoring it", "dn", user.DN, "sAMAccountName", accountName)
+				continue
+			}
+
+			groups := user.GetAttributeValues("memberOf")
+			if len(groups) == 0 {
+				h.logger.Warn("member was not a part of any group", "dn", user.DN)
+				continue
+			}
+			groupIDs := make([]string, len(groups))[:0]
+			for _, group := range groups {
+				id, ok := orgIDByDN[group]
+				if !ok {
+					continue // Group is not a dockyards org
+				}
+				groupMentioned[id] = true
+				groupIDs = append(groupIDs, id)
+			}
+			if len(groupIDs) == 0 {
+				continue // User is not part of any dockyards org
+			}
+
+			userGroups[accountName] = groupIDs
+		}
+
+		for group := range groupMentioned {
+			displayName := orgNameByID[group]
+			err := h.createOrgIfNeeded(ctx, config, group, displayName)
 			if err != nil {
-				h.logger.Warn("could not create member", "err", err, "org", org, "name", member)
+				h.logger.Warn("could not create org", "err", err, "name", group, "displayName", displayName)
+				continue
+			}
+		}
+
+		for member, groups := range userGroups {
+			for _, group := range groups {
+				err := h.createMemberIfNeeded(ctx, config, group, member)
+				if err != nil {
+					h.logger.Warn("could not create member", "err", err, "org", group, "name", member)
+				}
 			}
 		}
 	}
 
-	h.sweep(ctx, config)
+	h.cleanup(ctx, config)
 }
 
-func (h *LDAPHandler) sweep(ctx context.Context, config *Config) {
+func (h *LDAPHandler) cleanup(ctx context.Context, config *Config) {
 	resourcesToDelete := config.resourcesToDelete()
 	for _, resource := range resourcesToDelete {
-		h.logger.Info("deleting resource", "kind", resource.GetObjectKind(), "namespace", resource.GetNamespace(), "name", resource.GetName())
+		h.logger.Info("resource was not mentioned in ldap, deleting it", "kind", resource.GetObjectKind(), "namespace", resource.GetNamespace(), "name", resource.GetName())
 		err := h.client.Delete(ctx, resource)
 		if err != nil {
 			h.logger.Warn("could not delete resource", "err", err, "namespace", resource.GetNamespace(), "name", resource.GetName())
