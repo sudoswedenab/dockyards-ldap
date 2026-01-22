@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
+	"math/rand"
 	"os"
 	"os/signal"
 
@@ -72,8 +74,8 @@ func main() {
 
 	logger, err := newLogger(logLevel)
 	if err != nil {
-        fmt.Printf("error preparing logger: %s", err)
-        os.Exit(1)
+		fmt.Printf("error preparing logger: %s", err)
+		os.Exit(1)
 	}
 
 	slogr := logr.FromSlogHandler(logger.Handler())
@@ -101,14 +103,14 @@ func main() {
 	}
 
 	configManagerOptions := []dyconfig.ConfigManagerOption{
-        dyconfig.WithLogger(logger),
-    }
-    dockyardsConfig, err := dyconfig.NewConfigManager(mgr, client.ObjectKey{Namespace: dockyardsSystemNamespace, Name: configMap}, configManagerOptions...)
-    if err != nil {
-        logger.Error("could not create config manager", "err", err)
+		dyconfig.WithLogger(logger),
+	}
+	dockyardsConfig, err := dyconfig.NewConfigManager(mgr, client.ObjectKey{Namespace: dockyardsSystemNamespace, Name: configMap}, configManagerOptions...)
+	if err != nil {
+		logger.Error("could not create config manager", "err", err)
 
-        os.Exit(1)
-    }
+		os.Exit(1)
+	}
 
 	err = mgr.Add(&LDAPHandler{
 		client: mgr.GetClient(),
@@ -140,13 +142,21 @@ type LDAPHandler struct {
 var _ manager.Runnable = &LDAPHandler{}
 
 func (h *LDAPHandler) Start(ctx context.Context) error {
+	exponentialBackoff := ExponentialBackoff{
+		MinDuration: 1 * time.Second,
+		MaxDuration: 15 * time.Minute,
+	}
 	for {
 		config := h.Config(ctx)
 		if config == nil {
-			h.logger.Warn("could not get config, retrying in 5s")
-			time.Sleep(5 * time.Second)
-			continue
+			backoff := exponentialBackoff.Next()
+			h.logger.Warn("could not get config, retrying soon", "backoff", backoff)
+			select {
+			case <-ctx.Done(): return nil
+			case <-time.After(backoff): continue
+			}
 		}
+		exponentialBackoff.Reset()
 
 		h.runOnce(ctx, config)
 
@@ -601,23 +611,52 @@ func (h *LDAPHandler) createMemberIfNeeded(ctx context.Context, config *Config, 
 	})
 }
 func newLogger(logLevel string) (*slog.Logger, error) {
-    var level slog.Level
-    switch logLevel {
-    case "debug":
-        level = slog.LevelDebug
-    case "info":
-        level = slog.LevelInfo
-    case "warn":
-        level = slog.LevelWarn
-    case "error":
-        level = slog.LevelError
-    default:
-        return nil, fmt.Errorf("unknown log level %s", logLevel)
-    }
+	var level slog.Level
+	switch logLevel {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		return nil, fmt.Errorf("unknown log level %s", logLevel)
+	}
 
-    handlerOptions := slog.HandlerOptions{
-        Level: level,
-    }
+	handlerOptions := slog.HandlerOptions{
+		Level: level,
+	}
 
-    return slog.New(slog.NewTextHandler(os.Stdout, &handlerOptions)), nil
+	return slog.New(slog.NewTextHandler(os.Stdout, &handlerOptions)), nil
+}
+
+type ExponentialBackoff struct {
+	MinDuration time.Duration
+	MaxDuration time.Duration
+	previousAttempts int
+}
+
+func (b *ExponentialBackoff) Next() time.Duration {
+	mult := math.Pow(2, float64(b.previousAttempts))
+	wait := time.Duration(float64(b.MinDuration) * mult)
+
+	if wait > b.MaxDuration {
+		wait = b.MaxDuration
+	}
+
+	jitter := time.Duration(rand.Float64() * float64(wait))
+	wait = wait + jitter
+
+	if wait > b.MaxDuration {
+		wait = b.MaxDuration
+	}
+
+	b.previousAttempts += 1
+	return wait
+}
+
+func (b *ExponentialBackoff) Reset() {
+	b.previousAttempts = 0
 }
