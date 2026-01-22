@@ -34,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	ldapv3 "github.com/go-ldap/ldap/v3"
@@ -248,38 +249,12 @@ func (c *Config) resourcesToDelete() []client.Object {
 	return result
 }
 
-func (c *Config) orgExists(subject string) bool {
-	name := c.orgName(subject)
-	for _, org := range c.orgs {
-		if org.Name != name {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
 func (c *Config) memberProviderID(subject string) string {
 	return fmt.Sprintf("%s://%s", c.providerName, subject)
 }
 
 func (c *Config) orgProviderID(subject string) string {
 	return fmt.Sprintf("%s://%s", c.providerName, subject)
-}
-
-func (c *Config) memberExists(orgSubject string, memberSubject string) bool {
-	orgName := c.orgName(orgSubject)
-	memberName := c.memberName(memberSubject)
-	for _, member := range c.members {
-		if member.Name != memberName {
-			continue
-		}
-		if member.Labels[dockyardsv1.LabelOrganizationName] != orgName {
-			continue
-		}
-		return true
-	}
-	return false
 }
 
 func (h *LDAPHandler) Config(ctx context.Context) *Config {
@@ -503,20 +478,12 @@ func (h *LDAPHandler) runOnce(ctx context.Context, config *Config) {
 		}
 
 		for group := range groupMentioned {
-			displayName := orgNameByID[group]
-			err := h.createOrgIfNeeded(ctx, config, group, displayName)
-			if err != nil {
-				h.logger.Warn("could not create org", "err", err, "name", group, "displayName", displayName)
-				continue
-			}
+			h.createOrPatchOrg(ctx, config, group, orgNameByID[group])
 		}
 
 		for member, groups := range userGroups {
 			for _, group := range groups {
-				err := h.createMemberIfNeeded(ctx, config, group, member)
-				if err != nil {
-					h.logger.Warn("could not create member", "err", err, "org", group, "name", member)
-				}
+				h.createOrPatchMember(ctx, config, group, member)
 			}
 		}
 	}
@@ -536,79 +503,92 @@ func (h *LDAPHandler) cleanup(ctx context.Context, config *Config) {
 	}
 }
 
-func (h *LDAPHandler) createOrgIfNeeded(ctx context.Context, config *Config, subject string, displayName string) error {
-	if config.orgExists(subject) {
-		config.markOrg(subject)
-		return nil
-	}
+func (h *LDAPHandler) createOrPatchOrg(ctx context.Context, config *Config, subject string, displayName string) {
+	config.markOrg(subject)
 
 	name := config.orgName(subject)
-	h.logger.Info("creating namespace", "subject", subject, "name", name)
-	err := h.client.Create(ctx, &corev1.Namespace{
+	namespace := corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
-			Labels: map[string]string{
-				dockyardsv1.LabelProviderName: config.providerName,
-			},
 		},
+	}
+	operation, err := controllerutil.CreateOrPatch(ctx, h.client, &namespace, func() error {
+		if namespace.Labels == nil {
+			namespace.Labels = map[string]string{}
+		}
+		namespace.Labels[dockyardsv1.LabelProviderName] = config.providerName
+		return nil
 	})
 	if err != nil {
-		h.logger.Error("could not create namespace", "err", err, "subject", subject, "name", name)
+		h.logger.Error("could not create or patch namespace", "err", err, "operation", operation, "subject", subject, "name", name)
+	}
+	if err == nil && operation != controllerutil.OperationResultNone {
+		h.logger.Info("modified namespace", "operation", operation, "subject", subject, "displayName", displayName)
 	}
 
-	h.logger.Info("creating organization", "subject", subject, "displayName", displayName)
 	providerID := config.orgProviderID(subject)
-	return h.client.Create(ctx, &dockyardsv1.Organization{
+
+	organization := dockyardsv1.Organization{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
-			Labels: map[string]string{
-				dockyardsv1.LabelProviderName: config.providerName,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind: "Namespace",
+					Name: namespace.Name,
+					UID: namespace.UID,
+				},
 			},
 		},
-		Spec: dockyardsv1.OrganizationSpec{
-			ProviderID: &providerID,
-			DisplayName: displayName,
-
-			MemberRefs: nil,
-			ProjectRef: nil,
-			CredentialRef: nil,
-
-			SkipAutoAssign: false,
-			Duration: nil,
-
-			NamespaceRef: &corev1.LocalObjectReference{
-				Name: name,
-			},
-		},
+	}
+	operation, err = controllerutil.CreateOrPatch(ctx, h.client, &organization, func() error {
+		if organization.Labels == nil {
+			organization.Labels = map[string]string{}
+		}
+		organization.Labels[dockyardsv1.LabelProviderName] = config.providerName
+		organization.Spec.ProviderID = &providerID
+		organization.Spec.DisplayName = displayName
+		organization.Spec.NamespaceRef = &corev1.LocalObjectReference{Name: name}
+		return nil
 	})
+	if err != nil {
+		h.logger.Error("could not create or patch organization", "err", err, "operation", operation, "subject", subject, "name", name)
+	}
+	if err == nil && operation != controllerutil.OperationResultNone {
+		h.logger.Info("modified organization", "operation", operation, "namespace", organization.Namespace, "name", organization.Name, "displayName", displayName)
+	}
 }
 
-func (h *LDAPHandler) createMemberIfNeeded(ctx context.Context, config *Config, orgSubject string, userSubject string) error {
-	if config.memberExists(orgSubject, userSubject) {
-		config.markMember(orgSubject, userSubject)
-		return nil
-	}
+func (h *LDAPHandler) createOrPatchMember(ctx context.Context, config *Config, orgSubject string, userSubject string) {
+	config.markMember(orgSubject, userSubject)
 
-	h.logger.Info("creating member", "orgSubject", orgSubject, "userSubject", userSubject)
-	return h.client.Create(ctx, &dockyardsv1.Member{
+	member := dockyardsv1.Member{
 		ObjectMeta: metav1.ObjectMeta{
-			// FIXME: Org name is not necessarily the same as namespace
 			Namespace: config.orgName(orgSubject),
 			Name: config.memberName(userSubject),
-			Labels: map[string]string{
-				dockyardsv1.LabelOrganizationName: config.orgName(orgSubject),
-				dockyardsv1.LabelProviderName: config.providerName,
-			},
 		},
-		Spec: dockyardsv1.MemberSpec{
-			Role: dockyardsv1.RoleUser,
-			UserRef: corev1.TypedLocalObjectReference{
-				APIGroup: ptr.To("null"),
-				Kind: dockyardsv1.UserKind,
-				Name: config.userName(userSubject),
-			},
-		},
+	}
+	operation, err := controllerutil.CreateOrPatch(ctx, h.client, &member, func() error {
+		if member.Labels == nil {
+			member.Labels = map[string]string{}
+		}
+		member.Labels[dockyardsv1.LabelOrganizationName] = config.orgName(orgSubject)
+		member.Labels[dockyardsv1.LabelProviderName] = config.providerName
+
+		member.Spec.Role = dockyardsv1.RoleUser // FIXME: Get this from ldap.
+		member.Spec.UserRef = corev1.TypedLocalObjectReference{
+			APIGroup: ptr.To(dockyardsv1.GroupVersion.String()),
+			Kind: dockyardsv1.UserKind,
+			Name: config.userName(userSubject),
+		}
+		return nil
 	})
+	if err != nil {
+		h.logger.Error("could not create or patch member", "err", err, "operation", operation, "orgSubject", orgSubject, "userSubject", userSubject)
+	}
+	if err == nil && operation != controllerutil.OperationResultNone {
+		h.logger.Info("modified member", "operation", operation, "namespace", member.Namespace, "name", member.Name)
+	}
 }
 func newLogger(logLevel string) (*slog.Logger, error) {
 	var level slog.Level
