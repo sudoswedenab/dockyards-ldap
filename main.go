@@ -249,10 +249,6 @@ func (c *Config) resourcesToDelete() []client.Object {
 	return result
 }
 
-func (c *Config) memberProviderID(subject string) string {
-	return fmt.Sprintf("%s://%s", c.providerName, subject)
-}
-
 func (c *Config) orgProviderID(subject string) string {
 	return fmt.Sprintf("%s://%s", c.providerName, subject)
 }
