@@ -370,14 +370,20 @@ func (h *LDAPHandler) runOnce(ctx context.Context, config *Config) {
 		h.logger.Error("could not dial LDAP", "err", err)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		err := conn.Close()
+		h.logger.Error("failed to close ldap conn", "err", err)
+	}()
 
 	err = conn.Bind(config.username, config.password)
 	if err != nil {
 		h.logger.Error("could not bind LDAP", "err", err)
 		return
 	}
-	defer conn.Unbind()
+	defer func() {
+		err := conn.Unbind()
+		h.logger.Error("failed to unbind ldap conn", "err", err)
+	}()
 
 	orgQuery, err := conn.SearchWithPaging(&ldapv3.SearchRequest{
 		BaseDN: config.organizationBaseDN,
