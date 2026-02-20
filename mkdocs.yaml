@@ -13,9 +13,8 @@
 # limitations under the License.
 
 site_name: Dockyards LDAP
-site_description: Component whihc synchronizes management cluster organizations and members through LDAP users and groups.
+site_description: Component which synchronizes management cluster organizations and members through LDAP users and groups.
 repo_url: https://github.com/sudoswedenab/dockyards-ldap
 nav:
-  - Overview: docs/index.md
-  - Configuration: docs/configuration.md
-  - Operations: docs/operations.md
+  - Reference: index.md
+  - How-To Guides: how-to
