@@ -3,3 +3,4 @@
 # ignore coverprofiles
 *.out
 /config/kustomization.yaml
+/site
